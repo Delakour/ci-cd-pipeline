@@ -1,7 +1,7 @@
 name: Backend CD (Dev)
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "dev" ]
 
 jobs:
   run-ci:

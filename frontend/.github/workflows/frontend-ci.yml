@@ -2,7 +2,7 @@ name: Frontend CI
 
 on:
   pull_request:
-    branches: [ "main", "prod" ]
+    branches: [ "dev", "main" ]
 
   workflow_call:
 
@@ -53,7 +53,7 @@ jobs:
 
       - name: Build
         env:
-          ENVIRONMENT: ${{ github.ref_name == 'prod' && 'prod' || 'dev' }}
+          ENVIRONMENT: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
         run: npm run build:${{ env.ENVIRONMENT }}
   
   notify-on-failure:
