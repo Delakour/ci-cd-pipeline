@@ -74,7 +74,7 @@ jobs:
       - name: Wait for site
         run: |
           for i in {1..12}; do
-            curl -f https://dev.parparsoftware.com && break
+            curl -f https://dev.domain.com && break
             sleep 5
           done
 
