@@ -35,7 +35,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm install --ignore-scripts
+        run: npm ci
 
       - name: Build
         run: npm run build:dev
@@ -58,26 +58,136 @@ jobs:
 
       - name: Invalidate CloudFront
         run: |
-          aws cloudfront create-invalidation \
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
             --distribution-id $CLOUDFRONT_DISTRIBUTION_ID \
-            --paths "/*"
-  
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "INVALIDATION_ID=$INVALIDATION_ID" >> $GITHUB_ENV
+      
+      - name: Wait for CloudFront invalidation
+        run: |
+          aws cloudfront wait invalidation-completed \
+            --distribution-id $CLOUDFRONT_DISTRIBUTION_ID \
+            --id $INVALIDATION_ID
+
+      - name: Wait for site
+        run: |
+          for i in {1..12}; do
+            curl -f https://dev.parparsoftware.com && break
+            sleep 5
+          done
+
+  playwright-tests:
+    name: Run Playwright tests
+    needs: [run-ci, deploy-frontend]
+    environment: dev
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    container:
+      image: mcr.microsoft.com/playwright:v1.58.2-jammy
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Playwright tests
+        id: playwright-tests
+        run: npx playwright test tests/sanity/sanity.spec.ts
+      
+  tests-failure-notification:
+    name: Notify Author on test failure
+    runs-on: ubuntu-latest
+    needs: [playwright-tests]
+    environment: dev
+    if: always() && needs.playwright-tests.result == 'failure'
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Notify PR Author on Failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+
+          # Try to get PR author
+          PR_AUTHOR=$(gh api \
+            repos/${{ github.repository }}/commits/${{ github.sha }}/pulls \
+            --jq '.[0].user.login' 2>/dev/null || echo "")
+
+          # If commit not from PR → use commit author
+          if [ -z "$PR_AUTHOR" ]; then
+            echo "No PR found for commit. Falling back to commit author."
+            PR_AUTHOR=$(git log -1 --pretty=format:'%an')
+          fi
+
+          # If still empty → fallback to GitHub actor
+          if [ -z "$PR_AUTHOR" ]; then
+            PR_AUTHOR="${{ github.actor }}"
+          fi
+
+          echo "Resolved Author: $PR_AUTHOR"
+
+          AUTHOR_EMAIL=$(gh api users/$PR_AUTHOR --jq '.email')
+
+          if [ "$AUTHOR_EMAIL" == "null" ] || [ -z "$AUTHOR_EMAIL" ]; then
+            AUTHOR_EMAIL=$(git log -1 --pretty=format:'%ae')
+          fi
+
+          SLACK_ID=$(curl -s -X GET "https://slack.com/api/users.lookupByEmail?email=$AUTHOR_EMAIL" \
+                     -H "Authorization: Bearer $SLACK_BOT_TOKEN" | jq -r '.user.id')
+
+          if [ "$SLACK_ID" != "null" ] && [ -n "$SLACK_ID" ]; then
+            MESSAGE=":rotating_light:* Mandatory Fix: The tests failed on the main branch after your PR was merged.*
+            *YOU MUST STOP EVERYTHING YOU'RE DOING RIGHT NOW AND FIX THE ISSUES FIRST.*
+            *Author:* $PR_AUTHOR
+            *Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View failing workflow>"
+            
+            PAYLOAD=$(jq -n --arg ch "$SLACK_ID" --arg txt "$MESSAGE" '{channel: $ch, text: $txt}')
+            
+            curl -s -X POST -H 'Content-type: application/json' \
+                 -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+                 --data "$PAYLOAD" \
+                 https://slack.com/api/chat.postMessage
+          else
+            echo "Could not find Slack ID for $AUTHOR_EMAIL. Manual follow-up needed."
+          fi
+
   notify-on-failure:
     name: Notify on failure
     runs-on: ubuntu-latest
-    needs: [run-ci, deploy-frontend]
+    needs: [run-ci, deploy-frontend, playwright-tests]
     if: failure()
 
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Send Slack notification
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           WORKFLOW: ${{ github.workflow }}
+          DEVELOPER: ${{ github.actor }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           payload=$(cat <<EOF
           {
             "text": ":x: *${WORKFLOW} failed*\n\
+            *Developer:* ${DEVELOPER}\n\
             *Reason:* One or more steps in this job failed\n\
             <${RUN_URL}|View full logs>"
           }
