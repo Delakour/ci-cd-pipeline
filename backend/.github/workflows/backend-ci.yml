@@ -8,6 +8,10 @@ on:
     secrets:
       RAG_SCRAPING_GITHUB_TOKEN:
         required: true
+      CI_AWS_ACCESS_KEY:
+        required: true
+      CI_AWS_SECRET_ACCESS_KEY:
+        required: true
 
 jobs:
   
@@ -259,11 +263,13 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           WORKFLOW: ${{ github.workflow }}
+          DEVELOPER: ${{ github.actor }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           payload=$(cat <<EOF
           {
             "text": ":x: *${WORKFLOW} failed*\n\
+            *Developer:* ${DEVELOPER}\n\
             *Reason:* One or more steps in this job failed\n\
             <${RUN_URL}|View full logs>"
           }

@@ -9,50 +9,63 @@ jobs:
     uses: ./.github/workflows/backend-ci.yml
     secrets:
       RAG_SCRAPING_GITHUB_TOKEN: ${{ secrets.RAG_SCRAPING_GITHUB_TOKEN }}
+      CI_AWS_ACCESS_KEY: ${{ secrets.CI_AWS_ACCESS_KEY }}
+      CI_AWS_SECRET_ACCESS_KEY: ${{ secrets.CI_AWS_SECRET_ACCESS_KEY }}
 
   deploy-backend:
-    name: Deploy backend to EC2 (dev)
+    name: Deploy backend to ECS (dev)
     needs: run-ci
     environment: dev
     runs-on: ubuntu-latest
 
     env:
       AWS_REGION: eu-north-1
-      EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Trigger deploy script on EC2 via SSM
-        id: ssm
-        run: |
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy backend (dev) from GitHub Actions" \
-            --parameters '{
-              "executionTimeout":["3600"],
-              "workingDirectory":["/home/ubuntu"],
-              "commands":[
-                "sudo -u ubuntu bash /home/ubuntu/backend/deploy_backend.sh dev"
-              ]
-            }' \
-            --query "Command.CommandId" \
-            --output text)
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-          echo "command_id=$COMMAND_ID" >> $GITHUB_OUTPUT
-          echo "SSM Command ID: $COMMAND_ID"
-
-      - name: Wait for deployment to finish
+      - name: Build, tag and push image to ECR
         run: |
-          aws ssm wait command-executed \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --command-id "${{ steps.ssm.outputs.command_id }}"
+          SHA=$(git rev-parse --short HEAD)
+          echo "SHA=$SHA" >> $GITHUB_ENV
+
+          docker build \
+            --build-arg GITHUB_TOKEN=${{ secrets.RAG_SCRAPING_GITHUB_TOKEN }} \
+            -t backend \
+             backend
+
+          docker tag backend $ECR_REPOSITORY:$SHA
+          docker tag backend $ECR_REPOSITORY:dev
+
+          docker push $ECR_REPOSITORY:$SHA
+          docker push $ECR_REPOSITORY:dev
+
+        
+      - name: Force new deployment on ECS service
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment
+
+      - name: Wait for ECS service stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE
 
   notify-on-failure:
     name: Notify on failure
@@ -66,11 +79,13 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           WORKFLOW: ${{ github.workflow }}
+          DEVELOPER: ${{ github.actor }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           payload=$(cat <<EOF
           {
             "text": ":x: *${WORKFLOW} failed*\n\
+            *Developer:* ${DEVELOPER}\n\
             *Reason:* One or more steps in this job failed\n\
             <${RUN_URL}|View full logs>"
           }

@@ -26,7 +26,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies (no native scripts)
-        run: npm install --ignore-scripts
+        run: npm ci
         
       - name: Check for Hebrew characters
         run: |
@@ -68,11 +68,13 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           WORKFLOW: ${{ github.workflow }}
+          DEVELOPER: ${{ github.actor }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           payload=$(cat <<EOF
           {
             "text": ":x: *${WORKFLOW} failed*\n\
+            *Developer:* ${DEVELOPER}\n\
             *Reason:* One or more steps in this job failed\n\
             <${RUN_URL}|View full logs>"
           }
